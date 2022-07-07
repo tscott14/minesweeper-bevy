@@ -1,6 +1,8 @@
+use bevy::app::AppExit;
 use bevy::prelude::*;
 
 use crate::cell::{CellState, CellType};
+use crate::coordinates::Coordinates;
 use crate::field::Field;
 
 #[derive(PartialEq)]
@@ -38,24 +40,6 @@ impl FlagCount {
 #[derive(Component)]
 pub struct FieldButton;
 
-#[derive(Component)]
-pub struct Button;
-
-#[derive(Component)]
-pub struct Cordinates {
-    pub x_coord: isize,
-    pub y_coord: isize,
-}
-
-impl Cordinates {
-    pub fn new(x: isize, y: isize) -> Self {
-        Self {
-            x_coord: x,
-            y_coord: y,
-        }
-    }
-}
-
 pub fn setup(
     mut commands: Commands,
     map: Res<Field>,
@@ -78,8 +62,8 @@ pub fn setup(
         color: Color::BLACK,
     };
 
-    for y in 0..map.dimensions.height {
-        for x in 0..map.dimensions.width {
+    for y in 0..map.dimensions.get_height() {
+        for x in 0..map.dimensions.get_width() {
             let loc_x = (x as f32) * cell_size - half_width + half_cell_size;
             let loc_y = (y as f32) * cell_size - half_height + half_cell_size;
 
@@ -87,7 +71,7 @@ pub fn setup(
                 .spawn()
                 .insert(FieldButton)
                 .insert(Button)
-                .insert(Cordinates {
+                .insert(Coordinates {
                     x_coord: x as isize,
                     y_coord: y as isize,
                 })
@@ -111,7 +95,7 @@ pub fn setup(
             commands
                 .spawn()
                 .insert(FieldButton)
-                .insert(Cordinates {
+                .insert(Coordinates {
                     x_coord: x as isize,
                     y_coord: y as isize,
                 })
@@ -140,8 +124,8 @@ pub fn setup(
 
 pub fn update_field(
     mut map: ResMut<Field>,
-    mut field_entities: Query<(Entity, &Cordinates, &mut Sprite), With<FieldButton>>,
-    mut field_entities_bomb_count: Query<(Entity, &Cordinates, &mut Text), With<FieldButton>>,
+    mut field_entities: Query<(&Coordinates, &mut Sprite), With<FieldButton>>,
+    mut field_entities_bomb_counter_text: Query<(&Coordinates, &mut Text), With<FieldButton>>,
     game_state: Res<GameState>,
 ) {
     let color_unknown = Color::rgb(0.777, 0.777, 0.777);
@@ -151,8 +135,9 @@ pub fn update_field(
     let color_critical = Color::rgb(1.0, 0.0, 0.0);
     let color_dead = Color::rgb(0.0, 0.0, 0.0);
 
-    for (_entity, coords, mut sprite) in field_entities.iter_mut() {
-        sprite.color = match map.at_mut(&coords).unwrap() {
+    for (coords, mut sprite) in field_entities.iter_mut() {
+        // This should never assert!
+        sprite.color = match map.get_mut(&coords).unwrap() {
             (CellType::EMPTY(_), CellState::UNKNOWN) => color_unknown,
             (CellType::EMPTY(_), CellState::FLAGGED) => color_alert,
             (CellType::EMPTY(_), CellState::EXPOSED) => color_safe,
@@ -176,14 +161,14 @@ pub fn update_field(
         };
     }
 
-    for (_entity, coords, mut text) in field_entities_bomb_count.iter_mut() {
-        if let (CellType::EMPTY(Some(bomb_count)), _) = map.at(&coords).unwrap() {
+    for (coords, mut text) in field_entities_bomb_counter_text.iter_mut() {
+        if let (CellType::EMPTY(Some(bomb_count)), _) = map.get_clone(&coords).unwrap() {
             text.sections[0].value = format!("{}", bomb_count);
         }
     }
 }
 
-fn flood_fill(coords: &Cordinates, mut field: &mut ResMut<Field>) {
+fn flood_fill(mut field: &mut ResMut<Field>, coords: &Coordinates) {
     let bombs = field.count_bomb_neighbors(coords);
     if bombs > 0 {
         field.set_cell_type(&coords, CellType::EMPTY(Some(bombs)));
@@ -193,32 +178,31 @@ fn flood_fill(coords: &Cordinates, mut field: &mut ResMut<Field>) {
 
     let x = coords.x_coord;
     let y = coords.y_coord;
-    match field.at(&coords) {
+    match field.get_clone(&coords) {
         Some((CellType::EMPTY(_), CellState::UNKNOWN)) => {
             field.set_cell_state(&coords, CellState::EXPOSED);
 
-            flood_fill(&Cordinates::new(x - 1, y), &mut field);
-            flood_fill(&Cordinates::new(x + 1, y), &mut field);
-            flood_fill(&Cordinates::new(x, y - 1), &mut field);
-            flood_fill(&Cordinates::new(x, y + 1), &mut field);
+            flood_fill(&mut field, &Coordinates::new(x - 1, y));
+            flood_fill(&mut field, &Coordinates::new(x + 1, y));
+            flood_fill(&mut field, &Coordinates::new(x, y - 1));
+            flood_fill(&mut field, &Coordinates::new(x, y + 1));
         }
         _ => {}
     }
 }
 
 fn process_cell(
-    coords: Cordinates,
+    coords: Coordinates,
     mut field: &mut ResMut<Field>,
     game_state: &mut ResMut<GameState>,
 ) {
-    let cell = field.at_mut(&coords).unwrap();
+    let cell = field.get_mut(&coords).unwrap();
     match cell {
         (_, CellState::FLAGGED) => {} // Do Nothing
         (_, CellState::EXPOSED) => {} // Do Nothing
         (CellType::EMPTY(_), CellState::UNKNOWN) => {
             // flood fill
-            println!("Flood fill");
-            flood_fill(&coords, &mut field);
+            flood_fill(&mut field, &coords);
         }
 
         (CellType::BOMB, CellState::UNKNOWN) => {
@@ -230,10 +214,10 @@ fn process_cell(
 }
 
 pub fn check_cell_selected(
-    btns: Res<Input<MouseButton>>,
     mut field: ResMut<Field>,
     mut game_state: ResMut<GameState>,
     mut flag_count: ResMut<FlagCount>,
+    btns: Res<Input<MouseButton>>,
     windows: Res<Windows>,
 ) {
     if game_state.game_state == GameStates::GameOver {
@@ -250,7 +234,11 @@ pub fn check_cell_selected(
         if let Some(position) = window.cursor_position() {
             let x_coord = (position.x / cell_size) as isize;
             let y_coord = (position.y / cell_size) as isize;
-            process_cell(Cordinates { x_coord, y_coord }, &mut field, &mut game_state);
+            process_cell(
+                Coordinates { x_coord, y_coord },
+                &mut field,
+                &mut game_state,
+            );
         }
     }
 
@@ -261,11 +249,11 @@ pub fn check_cell_selected(
             let x_coord = (position.x / cell_size) as isize;
             let y_coord = (position.y / cell_size) as isize;
 
-            if let Some((_, state)) = field.at(&Cordinates { x_coord, y_coord }) {
+            if let Some((_, state)) = field.get_clone(&Coordinates { x_coord, y_coord }) {
                 if state == CellState::FLAGGED {
                     flag_count.count += 1;
                     println!("Flags Remaining: {}", flag_count.count);
-                    field.set_cell_state(&Cordinates { x_coord, y_coord }, CellState::UNKNOWN);
+                    field.set_cell_state(&Coordinates { x_coord, y_coord }, CellState::UNKNOWN);
                 } else {
                     if flag_count.count <= 0 {
                         println!(
@@ -274,7 +262,7 @@ pub fn check_cell_selected(
                     } else {
                         flag_count.count -= 1;
                         println!("Flags Remaining: {}", flag_count.count);
-                        field.set_cell_state(&Cordinates { x_coord, y_coord }, CellState::FLAGGED);
+                        field.set_cell_state(&Coordinates { x_coord, y_coord }, CellState::FLAGGED);
                     }
                 }
             }
@@ -282,7 +270,11 @@ pub fn check_cell_selected(
     }
 }
 
-pub fn check_for_win(field: Res<Field>, mut game_state: ResMut<GameState>) {
+pub fn check_for_win(
+    mut game_state: ResMut<GameState>,
+    mut exit: EventWriter<AppExit>,
+    field: Res<Field>,
+) {
     for (cell_type, cell_state) in field.cells.iter() {
         if cell_type == &CellType::BOMB && cell_state != &CellState::FLAGGED {
             return;
@@ -290,14 +282,15 @@ pub fn check_for_win(field: Res<Field>, mut game_state: ResMut<GameState>) {
     }
     game_state.game_state = GameStates::GameWon;
     println!("Congrats, You won");
+    exit.send(AppExit);
 }
 
 pub fn check_for_game_reset(
-    keys: Res<Input<KeyCode>>,
     mut field: ResMut<Field>,
     mut game_state: ResMut<GameState>,
     mut flag_count: ResMut<FlagCount>,
     mut field_entities_bomb_count: Query<&mut Text, With<FieldButton>>,
+    keys: Res<Input<KeyCode>>,
 ) {
     if keys.just_pressed(KeyCode::Space) {
         field.reset();
